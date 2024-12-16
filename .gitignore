@@ -1,1 +1,4 @@
 my_*.cfg
+
+# Generated while running unit tests.
+__pycache__
