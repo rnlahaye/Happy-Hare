@@ -421,7 +421,7 @@ class Mmu:
         self.macro_toolhead_max_accel = config.getfloat('macro_toolhead_max_accel', 0, minval=0)
         self.macro_toolhead_min_cruise_ratio = config.getfloat('macro_toolhead_min_cruise_ratio', minval=0., below=1.)
         if self.macro_toolhead_max_accel == 0:
-            self.macro_toolhead_max_accel = config.getsection('printer').getsection('toolhead').getint('max_accel', 5000)
+            self.macro_toolhead_max_accel = config.getsection('printer').getint('max_accel', 5000)
 
         # Optional features
         self.has_filament_buffer = bool(config.getint('has_filament_buffer', 1, minval=0, maxval=1))
