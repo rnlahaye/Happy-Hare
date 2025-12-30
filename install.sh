@@ -10,7 +10,7 @@
 #               2024  Unsweeticetea <iamzevle@gmail.com>
 #               2024  Dmitry Kychanov <k1-801@mail.ru>
 #
-VERSION=3.1 # Important: Keep synced with mmy.py
+VERSION=3.41 # Important: Keep synced with mmy.py
 
 F_VERSION=$(echo "$VERSION" | sed 's/\([0-9]\+\)\.\([0-9]\)\([0-9]\)/\1.\2.\3/')
 SCRIPT="$(readlink -f "$0")"
@@ -19,11 +19,17 @@ SCRIPTPATH="$(dirname "$SCRIPT")"
 SCRIPTNAME="$0"
 ARGS=( "$@" )
 
-# Creality K1 series printers run on MIPS, with a limited instruction set and different default klipper directories
-# Checking for machine type is the easiest way so far to spot them (will be set to 1 if on MIPS):
-IS_MIPS=0
-if [ $(uname -m) = "mips" ]; then
-    IS_MIPS=1
+# Provide klipper installation path and settings for different systems
+
+OS_CREALITY_K1="creality-k1"
+OS_FLYOS_FAST="flyos-fast"
+OS_TYPE=""
+if [ $(uname -m) = "mips" ] && [ -d "/usr/data/creality" ]; then
+    OS_TYPE="${OS_CREALITY_K1}"
+    echo "Detected Creality K1 series printer"
+elif [ $(sed -n 's/^NAME="\(.*\)"/\1/p' /etc/os-release 2>/dev/null) = "FlyOS-Fast" ]; then
+    OS_TYPE="${OS_FLYOS_FAST}"
+    echo "Detected FlyOS-Fast"
 fi
 
 KLIPPER_HOME="${HOME}/klipper"
@@ -33,10 +39,16 @@ OCTOPRINT_KLIPPER_CONFIG_HOME="${HOME}"
 KLIPPER_LOGS_HOME="${HOME}/printer_data/logs"
 OLD_KLIPPER_CONFIG_HOME="${HOME}/klipper_config"
 
-if [ "$IS_MIPS" -eq 1 ]; then
+if [ "$OS_TYPE" = "$OS_CREALITY_K1" ]; then
     KLIPPER_HOME="/usr/share/klipper"
     MOONRAKER_HOME="/usr/data/moonraker/moonraker"
     KLIPPER_CONFIG_HOME="/usr/data/printer_data/config"
+    unset OCTOPRINT_KLIPPER_CONFIG_HOME
+    unset OLD_KLIPPER_CONFIG_HOME
+elif [ "$OS_TYPE" = "$OS_FLYOS_FAST" ]; then
+    KLIPPER_HOME="/data/klipper"
+    MOONRAKER_HOME="/data/moonraker"
+    KLIPPER_CONFIG_HOME="/usr/share/printer_data/config"
     unset OCTOPRINT_KLIPPER_CONFIG_HOME
     unset OLD_KLIPPER_CONFIG_HOME
 fi
@@ -118,8 +130,8 @@ self_update() {
     cd "$SCRIPTPATH"
 
     set +e
-    # timeout is unavailable on MIPS
-    if [ "$IS_MIPS" -ne 1 ]; then
+    # There is no timeout function provided in the system
+    if [ -n "$(which timeout)" ]; then
         BRANCH=$(timeout 3s git branch --show-current)
     else
         BRANCH=$(git branch --show-current)
@@ -128,7 +140,7 @@ self_update() {
     if [ $? -ne 0 ]; then
         echo -e "${ERROR}Error updating from github"
         echo -e "${ERROR}You might have an old version of git"
-        echo -e "${ERROR}Skipping automatic update..." 
+        echo -e "${ERROR}Skipping automatic update..."
         set -e
         return
     fi
@@ -197,26 +209,23 @@ function nextsuffix {
 }
 
 verify_not_root() {
-    if [ "$IS_MIPS" -ne 1 ]; then
+    if [ "$OS_TYPE" = "$OS_CREALITY_K1" ]; then
+        echo -e "${WARNING}This script is run on a ${OS_TYPE} system, so we want it to be run as root"
+        return
+    elif [ "$OS_TYPE" = "$OS_FLYOS_FAST" ]; then
+        echo -e "${WARNING}This script is run on a ${OS_TYPE} system, so we want it to be run as root"
+        return
+    else
         if [ "$EUID" -eq 0 ]; then
             echo -e "${ERROR}This script must not run as root"
             exit -1
         fi
-    else
-        echo -e "${WARNING}This script is running on a MIPS system, so we expect it to be run as root"
     fi
 }
 
 check_klipper() {
     if [ "$NOSERVICE" -ne 1 ]; then
-        if [ "$IS_MIPS" -ne 1 ]; then
-            if [ "$(systemctl list-units --full -all -t service --no-legend | grep -F "${KLIPPER_SERVICE}")" ]; then
-                echo -e "${DIM}Klipper ${KLIPPER_SERVICE} systemd service found"
-            else
-                echo -e "${ERROR}Klipper ${KLIPPER_SERVICE} systemd service not found! Please install Klipper first"
-                exit -1
-            fi
-        else
+        if [ "$OS_TYPE" = "$OS_CREALITY_K1" ]; then
             # There is no systemd on MIPS, we can only check the running processes
             running_klipper_pid=$(ps -o pid,comm,args | grep [^]]/klipper/klippy/klippy.py | awk '{print $1}')
             KLIPPER_PID_FILE=/var/run/klippy.pid
@@ -227,13 +236,22 @@ check_klipper() {
                 echo -e "${ERROR}Klipper service not found! Please install Klipper first"
                 exit -1
             fi
+        else
+            if [ "$(systemctl list-units --full -all -t service --no-legend | grep -F "${KLIPPER_SERVICE}")" ]; then
+                echo -e "${DIM}Klipper ${KLIPPER_SERVICE} systemd service found"
+            else
+                echo -e "${ERROR}Klipper ${KLIPPER_SERVICE} systemd service not found! Please install Klipper first"
+                exit -1
+            fi
         fi
     fi
 }
 
 check_octoprint() {
-    if [ "$IS_MIPS" -eq 1 ]; then
+    if [ "$OS_TYPE" = "$OS_CREALITY_K1" ]; then
         OCTOPRINT=0 # Octoprint can not be set up on MIPS
+    elif [ "$OS_TYPE" = "$OS_FLYOS_FAST" ]; then
+        OCTOPRINT=0 # Octoprint can not be set up on FlyOS-Fast
     elif [ "$NOSERVICE" -ne 1 ]; then
         if [ "$(sudo systemctl list-units --full -all -t service --no-legend | grep -F "octoprint.service")" ]; then
             echo -e "${DIM}OctoPrint service found"
@@ -331,8 +349,7 @@ parse_file() {
     file="$1"
     prefix_filter="$2"
     namespace="$3"
-    checkdup="$4"
-    checkdup=""
+    merge="$4"
 
     if [ ! -f "${file}" ]; then
         return
@@ -361,9 +378,14 @@ parse_file() {
             if echo "$parameter" | grep -E -q "${prefix_filter}"; then
                 if [ "${value}" != "" ]; then
                     combined="${namespace}${parameter}"
-                    if [ -n "${checkdup}" ] && [ ! -z "${!combined+x}" ]; then
-                        echo -e "${ERROR}${parameter} defined multiple times!"
+                    if [ ! -z "${!combined+x}" ]; then
+                        if [ "${merge}" == "merge" ]; then
+                            continue # Use existing value
+                        elif [ "${merge}" == "checkdup" ]; then
+                            echo -e "${ERROR}${parameter} defined multiple times!"
+                        fi
                     fi
+                    # Set/overwrite value in memory
                     if echo "$value" | grep -q '^{.*}$'; then
                         eval "${combined}=\$${value}"
                     elif [ "${value%"${value#?}"}" = "'" ]; then
@@ -452,7 +474,7 @@ read_previous_mmu_type() {
     HAS_SELECTOR="yes"
     dest_cfg="${KLIPPER_CONFIG_HOME}/mmu/base/mmu_hardware.cfg"
     if [ -f "${dest_cfg}" ]; then
-        if ! grep -q "^\[stepper_mmu_selector\]" "${dest_cfg}"; then
+        if ! grep -q "^\[stepper_mmu_selector.*\]" "${dest_cfg}"; then
             HAS_SELECTOR="no"
         fi
     fi
@@ -470,6 +492,13 @@ read_previous_mmu_type() {
             HAS_ENCODER="no"
         fi
     fi
+    HAS_ESPOOLER="yes"
+    dest_cfg="${KLIPPER_CONFIG_HOME}/mmu/base/mmu_hardware.cfg"
+    if [ -f "${dest_cfg}" ]; then
+        if ! grep -q "^\[mmu_espooler mmu_espooler\]" "${dest_cfg}"; then
+            HAS_ESPOOLER="no"
+        fi
+    fi
 
     # Figure out the selector type based on h/w presence
     if [ "$HAS_SELECTOR" == "no" -a "$HAS_SERVO" == "no" ]; then
@@ -481,24 +510,36 @@ read_previous_mmu_type() {
     else
         _hw_selector_type='LinearSelector'
     fi
+    echo -e "${INFO}HAS_SELECTOR=${HAS_SELECTOR}"
+    echo -e "${INFO}HAS_SERVO=${HAS_SERVO}"
+    echo -e "${INFO}HAS_ENCODER=${HAS_ENCODER}"
+    echo -e "${INFO}HAS_ESPOOLER=${HAS_ESPOOLER}"
+    echo -e "${INFO}Determined you have a ${_hw_selector_type} or similar"
 }
 
 # Set default parameters from the distribution (reference) config files
 read_default_config() {
-    echo -e "${INFO}Reading default configuration parameters..."
+    if [ "$1" == "merge" ]; then
+        echo -e "${INFO}Merging default configuration parameters..."
+        merge="merge"
+    else
+        echo -e "${INFO}Reading default configuration parameters..."
+        merge="checkdup"
+    fi
+
     if [ "$HAS_SELECTOR" == "no" -a "$HAS_SERVO" == "no" ]; then
-        parse_file "${SRCDIR}/config/base/mmu_parameters.cfg.vs" ""            "_param_" "checkdup"
+        parse_file "${SRCDIR}/config/base/mmu_parameters.cfg.vs" ""            "_param_" "$merge"
     elif [ "$HAS_SELECTOR" == "no" -a "$HAS_SERVO" == "yes" ]; then
-        parse_file "${SRCDIR}/config/base/mmu_parameters.cfg.ss" ""            "_param_" "checkdup"
+        parse_file "${SRCDIR}/config/base/mmu_parameters.cfg.ss" ""            "_param_" "$merge"
     elif [ "$HAS_SELECTOR" == "yes" -a "$HAS_SERVO" == "no" ]; then
-        parse_file "${SRCDIR}/config/base/mmu_parameters.cfg.rs" ""            "_param_" "checkdup"
+        parse_file "${SRCDIR}/config/base/mmu_parameters.cfg.rs" ""            "_param_" "$merge"
     else
         # All other selector types
-        parse_file "${SRCDIR}/config/base/mmu_parameters.cfg" ""               "_param_" "checkdup"
+        parse_file "${SRCDIR}/config/base/mmu_parameters.cfg" ""               "_param_" "$merge"
     fi
-    parse_file "${SRCDIR}/config/base/mmu_macro_vars.cfg" "variable_|filename" ""        "checkdup"
+    parse_file "${SRCDIR}/config/base/mmu_macro_vars.cfg" "variable_|filename" ""        "$merge"
     for file in `cd ${SRCDIR}/config/addons ; ls *.cfg | grep -v "_hw" | grep -v "my_"`; do
-        parse_file "${SRCDIR}/config/addons/${file}"      "variable_"          ""        "checkdup"
+        parse_file "${SRCDIR}/config/addons/${file}"      "variable_"          ""        "$merge"
     done
 }
 
@@ -638,14 +679,87 @@ read_previous_config() {
             variable_pin_loc_compressed_xy="${pin_loc_x}, ${variable_pin_loc_compressed}"
         fi
     fi
+
+    # v3.2.0
+    # eSpooler move from macro to mmu_parameters
+    if [ "${variable_max_step_speed}" != "" ]; then
+        _param_espooler_max_stepper_speed=${variable_max_step_speed}
+    fi
+    if [ "${variable_min_distance}" != "" ]; then
+        _param_espooler_min_distance=${variable_min_distance}
+    fi
+    if [ "${variable_step_speed_exponent}" != "" ]; then
+        _param_espooler_speed_exponent=${variable_step_speed_exponent}
+    fi
+    # Change -1 to -999 for no park move (allows for negative movement in user macros)
+    if ! check_for_999 \
+       "${variable_park_toolchange}" \
+       "${variable_park_runout}" \
+       "${variable_park_pause}" \
+       "${variable_park_cancel}" \
+       "${variable_park_complete}" \
+       "${variable_pre_unload_position}" \
+       "${variable_post_form_tip_position}" \
+       "${variable_pre_load_position}"
+    then
+        variable_park_toolchange=$(convert_neg_one "${variable_park_toolchange}")
+        variable_park_runout=$(convert_neg_one "${variable_park_runout}")
+        variable_park_pause=$(convert_neg_one "${variable_park_pause}")
+        variable_park_cancel=$(convert_neg_one "${variable_park_cancel}")
+        variable_park_complete=$(convert_neg_one "${variable_park_complete}")
+        variable_pre_unload_position=$(convert_neg_one "${variable_pre_unload_position}")
+        variable_post_form_tip_position=$(convert_neg_one "${variable_post_form_tip_position}")
+        variable_pre_load_position=$(convert_neg_one "${variable_pre_load_position}")
+    fi
+
+    # v3.2.0
+    if [ "${_param_sync_feedback_enable}" != "" ]; then
+        _param_sync_feedback_enabled=${_param_sync_feedback_enable}
+    fi
+
+    # v3.4.0 - led config moved to v4 format (from macro to python module)
+    # <users are going to be responsible for this...>
+    #if [ "${variable_led_enable}" != "" ]; then
+    #    _hw_led_enable=$(convert_boolean_string_to_int "${variable_led_enable}")
+    #fi
 }
 
-# Helper for upgrade logic
+check_for_999() {
+    for var in "$@"; do
+        if echo "${var}" | grep -q "\-999"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+convert_neg_one() {
+    echo "$1" | awk -F',' '
+    {
+        if ($1 ~ /^ *-1 *$/) $1 = " -999";
+        if ($2 ~ /^ *-1 *$/) $2 = " -999";
+        OFS=","
+        for (i=1; i<=NF; i++) {
+            printf "%s%s", $i, (i<NF ? OFS : ORS)
+        }
+    }'
+}
+
 convert_to_boolean_string() {
     if [ "$1" -eq 1 ] 2>/dev/null; then
         echo "True"
     elif [ "$1" -eq 0 ] 2>/dev/null; then
         echo "False"
+    else
+        echo "$1"
+    fi
+}
+
+convert_boolean_string_to_int() {
+    if [ "$1" == "True" ] 2>/dev/null; then
+        echo 1
+    elif [ "$1" == "False" ] 2>/dev/null; then
+        echo 0
     else
         echo "$1"
     fi
@@ -682,8 +796,8 @@ upgrade_mmu_hardware() {
 # MMU MACHINE / TYPE ---------------------------------------------------------------------------------------------------
 # ███╗   ███╗███╗   ███╗██╗   ██╗    ███╗   ███╗ █████╗  ██████╗██╗  ██╗██╗███╗   ██╗███████╗
 # ████╗ ████║████╗ ████║██║   ██║    ████╗ ████║██╔══██╗██╔════╝██║  ██║██║████╗  ██║██╔════╝
-# ██╔████╔██║██╔████╔██║██║   ██║    ██╔████╔██║███████║██║     ███████║██║██╔██╗ ██║█████╗  
-# ██║╚██╔╝██║██║╚██╔╝██║██║   ██║    ██║╚██╔╝██║██╔══██║██║     ██╔══██║██║██║╚██╗██║██╔══╝  
+# ██╔████╔██║██╔████╔██║██║   ██║    ██╔████╔██║███████║██║     ███████║██║██╔██╗ ██║█████╗
+# ██║╚██╔╝██║██║╚██╔╝██║██║   ██║    ██║╚██╔╝██║██╔══██║██║     ██╔══██║██║██║╚██╗██║██╔══╝
 # ██║ ╚═╝ ██║██║ ╚═╝ ██║╚██████╔╝    ██║ ╚═╝ ██║██║  ██║╚██████╗██║  ██║██║██║ ╚████║███████╗
 # ╚═╝     ╚═╝╚═╝     ╚═╝ ╚═════╝     ╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝╚══════╝
 [mmu_machine]
@@ -722,6 +836,130 @@ EOF
 
         echo -e "${INFO}Updated [mmu_leds] section in mmu_hardware.cfg..."
     fi
+
+    # v3.2.0: Add new [mmu_espooler] section as first section
+    found_mmu_espooler=$(grep -E -c "^#?\[mmu_espooler" ${hardware_cfg} || true)
+    found_stepper_mmu_gear_1=$(grep -E -c "^\[stepper_mmu_gear_1\]" ${hardware_cfg} || true)
+    if [ "${found_mmu_espooler}" -eq 0 -a "${found_stepper_mmu_gear_1}" -eq 1 ]; then
+
+        # Note params will be coming from mmu_parameters
+        new_section=$(cat <<EOF
+
+
+# ESPOOLER (OPTIONAL) -------------------------------------------------------------------------------------------------
+# ███████╗███████╗██████╗  ██████╗  ██████╗ ██╗     ███████╗██████╗
+# ██╔════╝██╔════╝██╔══██╗██╔═══██╗██╔═══██╗██║     ██╔════╝██╔══██╗
+# █████╗  ███████╗██████╔╝██║   ██║██║   ██║██║     █████╗  ██████╔╝
+# ██╔══╝  ╚════██║██╔═══╝ ██║   ██║██║   ██║██║     ██╔══╝  ██╔══██╗
+# ███████╗███████║██║     ╚██████╔╝╚██████╔╝███████╗███████╗██║  ██║
+# ╚══════╝╚══════╝╚═╝      ╚═════╝  ╚═════╝ ╚══════╝╚══════╝╚═╝  ╚═╝
+#
+# An espooler controls DC motors (typically N20) that are able to rewind a filament spool and optionally provide
+# forward assist to overcome spooler rotation friction. This should define pins for each of the gates on your mmu
+# starting with '_0'.
+# An empty pin can be deleted, commented or simply left blank. If you mcu has a separate "enable" pin
+#
+#[mmu_espooler mmu_espooler]
+#pwm: 1						# 1=PWM control (typical), 0=digital on/off control
+##hardware_pwm: 0				# See klipper doc
+##cycle_time: 0.100				# See klipper doc
+#scale: 1					# Scales the PWM output range
+#value: 0					# See klipper doc
+#shutdown_value: 0				# See klipper doc
+#
+#respool_motor_pin_0: mmu:MMU_ESPOOLER_RWD_0	# PWM (or digital) pin for rewind/respool movement
+#assist_motor_pin_0: mmu:MMU_ESPOOLER_FWD_0	# PWM (or digital) pin for forward motor movement
+#enable_motor_pin_0: mmu:MMU_ESPOOLER_EN_0	# Digital output for Afc mcu
+#assist_trigger_pin_0: mmu:MMU_ESPOOLER_TRIG_0	# Trigger pin for sensing need to assist during print
+#
+#respool_motor_pin_1: mmu:MMU_ESPOOLER_RWD_1
+#assist_motor_pin_1: mmu:MMU_ESPOOLER_FWD_1
+#enable_motor_pin_1: mmu:MMU_ESPOOLER_EN_1
+#assist_trigger_pin_1: mmu:MMU_ESPOOLER_TRIG_1
+#
+#respool_motor_pin_2: mmu:MMU_ESPOOLER_RWD_2
+#assist_motor_pin_2: mmu:MMU_ESPOOLER_FWD_2
+#enable_motor_pin_2: mmu:MMU_ESPOOLER_EN_2
+#assist_trigger_pin_2: mmu:MMU_ESPOOLER_TRIG_2
+#
+#respool_motor_pin_3: mmu:MMU_ESPOOLER_RWD_3
+#assist_motor_pin_3: mmu:MMU_ESPOOLER_FWD_3
+#enable_motor_pin_3: mmu:MMU_ESPOOLER_EN_3
+#assist_trigger_pin_3: mmu:MMU_ESPOOLER_TRIG_3
+
+EOF
+)
+        echo "${new_section}" >> "${hardware_cfg}"
+        echo -e "${INFO}Added new [mmu_machine] section to mmu_hardware.cfg..."
+    fi
+
+    # v3.4.0: Update [mmu_leds] section for v4 python impl
+    found_old_mmu_leds=$(grep -E -c "^\[mmu_leds\]" ${hardware_cfg} || true)
+    if [ "${found_old_mmu_leds}" -eq 1 ]; then
+
+        sed "s/\[mmu_leds\]/\[mmu_leds unit0\]/g" "${hardware_cfg}" > "${hardware_cfg}.tmp" && mv "${hardware_cfg}.tmp" ${hardware_cfg}
+        new_section=$(cat <<EOF
+
+# Default effects for LED segments when not providing action status
+#    off              - LED's off
+#    on               - LED's white
+#    gate_status      - indicate gate availability / status            (printer.mmu.gate_status)
+#    filament_color   - display filament color defined in gate map     (printer.mmu.gate_color_rgb)
+#    slicer_color     - display slicer defined set color for each gate (printer.mmu.slicer_color_rgb)
+#   (r,g,b)           - display static r,g,b color e.g. "0,0,0.3" for dim blue
+#    _effect_         - display the named led effect
+#
+enabled: True                           # True = LEDs are enabled at startup (MMU_LED can control), False = Disabled
+animation: True                         # True = Use led-animation-effects, False = Static LEDs
+exit_effect: gate_status                #    off|gate_status|filament_color|slicer_color|r,g,b|_effect_
+entry_effect: filament_color            #    off|gate_status|filament_color|slicer_color|r,g,b|_effect_
+status_effect: filament_color           # on|off|gate_status|filament_color|slicer_color|r,g,b|_effect_
+logo_effect: (0, 0, 0.3)                #    off                                        |r,g,b|_effect_
+white_light: (1, 1, 1)                  # RGB color for static white light
+black_light: (.01, 0, .02)              # RGB color used to represent "black" (filament)
+empty_light: (0, 0, 0)                  # RGB color used to represent empty gate
+
+# Default effects (animation: True) / static rbg (animation False) to apply to actions
+#   effect_name, (r,b,g)
+#
+# IMPORTANT: Effects must be from [mmu_led_effects] set defined in mmu_leds.cfg
+#
+effect_loading:            mmu_blue_clockwise_slow, (0, 0, 0.4)
+effect_loading_extruder:   mmu_blue_clockwise_fast, (0, 0, 1)
+effect_unloading:          mmu_blue_anticlock_slow, (0, 0, 0.4)
+effect_unloading_extruder: mmu_blue_anticlock_fast, (0, 0, 1)
+effect_heating:            mmu_breathing_red,       (0.3, 0, 0)
+effect_selecting:          mmu_white_fast,          (0.2, 0.2, 0.2)
+effect_checking:           mmu_white_fast,          (0.8, 0.8, 0.8)
+effect_initialized:        mmu_rainbow,             (0.5, 0.2, 0)
+effect_error:              mmu_strobe,              (1, 0, 0)
+effect_complete:           mmu_sparkle,             (0.3, 0.3, 0.3)
+effect_gate_selected:      mmu_static_blue,         (0, 0, 1)
+effect_gate_available:     mmu_static_green,        (0, 0.5, 0)
+effect_gate_available_sel: mmu_ready_green,         (0, 0.75, 0)
+effect_gate_unknown:       mmu_static_orange,       (0.5, 0.2, 0)
+effect_gate_unknown_sel:   mmu_ready_orange ,       (0.75, 0.3, 0)
+effect_gate_empty:         mmu_static_black,        (0, 0, 0)
+effect_gate_empty_sel:     mmu_ready_blue,          (0, 0, 0.2)
+
+EOF
+)
+        temp_file=$(mktemp)
+        echo "$new_section" > "$temp_file"
+        awk '
+            BEGIN { found = 0 }
+            /^frame_rate/ && !found {
+                print
+                while ((getline line < "'"$temp_file"'") > 0) print line
+                close("'"$temp_file"'")
+                found = 1
+                next
+            }
+            { print }
+        ' "${hardware_cfg}" > "${hardware_cfg}.tmp" && mv "${hardware_cfg}.tmp" "${hardware_cfg}"
+        rm "$temp_file"
+        echo -e "${INFO}Upgraded [mmu_leds] section in mmu_hardware.cfg with new settings..."
+    fi
 }
 
 copy_config_files() {
@@ -744,16 +982,6 @@ copy_config_files() {
         mkdir -p ${mmu_dir}/base
         mkdir -p ${mmu_dir}/optional
         mkdir -p ${mmu_dir}/addons
-    fi
-
-    _hw_additional_pins=
-    if [ ${ADDONS_DC_ESPOOLER} -eq 1 ]; then
-        for i in $(seq 0 $(expr $_hw_num_gates - 1)); do
-            espooler_pins="    MMU_DC_MOT_$(expr $i + 1)_EN={spooler_en_${i}_pin},\n"
-            espooler_pins="${espooler_pins}    MMU_DC_MOT_$(expr $i + 1)_A={spooler_rwd_${i}_pin},\n"
-            espooler_pins="${espooler_pins}    MMU_DC_MOT_$(expr $i + 1)_B={spooler_fwd_${i}_pin},\n"
-            _hw_additional_pins="${_hw_additional_pins}\n${espooler_pins}"
-        done
     fi
 
     # Now substitute tokens using given brd_type and "questionaire" starting values
@@ -789,11 +1017,11 @@ copy_config_files() {
     done
 
     # Find all variables in the form of PIN[$_hw_brd_type,*]
-    if [ "$HAS_SELECTOR" == "yes" ]; then
-        key_match="$_hw_brd_type"
-    else
+    if [ "$_hw_selector_type" == "VirtualSelector" ]; then
         # Type-B MMU has alternative pin allocation
         key_match="B,$_hw_brd_type"
+    else
+        key_match="$_hw_brd_type"
     fi
     for key in "${!PIN[@]}"; do
         if [[ $key == "$key_match"* ]]; then
@@ -825,7 +1053,23 @@ copy_config_files() {
 
         # Hardware files: Special token substitution -----------------------------------------
         if [ "${file}" == "mmu.cfg" -o "${file}" == "mmu_hardware.cfg" ]; then
-            cp ${src} ${dest}
+
+            # Kludge to support complete h/w configurations for dedicated MMUs
+            if [ "${_hw_mmu_vendor}" == "KMS" -o "${_hw_mmu_vendor}" == "VVD" ]; then
+                if [ "${_hw_mmu_vendor}" == "KMS" ]; then
+                    cp "${src}.kms" ${dest}
+                else
+                    cp "${src}.vvd" ${dest}
+                fi
+
+                # Do all the token substitution
+                cat ${dest} | sed -e "$sed_expr" "${dest}" > "${dest}.tmp" > ${dest}.tmp && mv ${dest}.tmp ${dest}
+
+                # Skip the rest because config was preconfigured
+                continue
+            else
+                cp ${src} ${dest}
+            fi
 
             # Correct shared uart_address for EASY-BRD
             if [ "${_hw_brd_type}" == "EASY-BRD" ]; then
@@ -868,8 +1112,7 @@ copy_config_files() {
 
             # Handle LED option - Comment out if disabled (section is last, go comment to end of file)
             if [ "${file}" == "mmu_hardware.cfg" -a "$SETUP_LED" == "no" ]; then
-                sed "/^\[neopixel mmu_leds\]/,+4 {/^[^#]/ s/^/#/}" ${dest} > ${dest}.tmp && mv ${dest}.tmp ${dest}
-                sed "/^\[mmu_leds\]/,+6 {/^[^#]/ s/^/#/}" ${dest} > ${dest}.tmp && mv ${dest}.tmp ${dest}
+                sed '/^\[\(neopixel mmu_leds\|mmu_leds\)\]/,${ /^[^#]/ s/^/#/ }' "${dest}" > "${dest}.tmp" && mv "${dest}.tmp" "${dest}"
             fi
 
             # Handle Encoder option - Comment out if not fitted so can easily be added later
@@ -878,15 +1121,23 @@ copy_config_files() {
                 #sed "/^# ENCODER/,+24 d" ${dest} > ${dest}.tmp && mv ${dest}.tmp ${dest}
             fi
 
+            # Handle Espooler option - Comment out if not fitted so can easily be added later
+            if [ "${file}" == "mmu_hardware.cfg" -a "$HAS_ESPOOLER" == "no" ]; then
+                sed "/^\[mmu_espooler mmu_espooler\]/,+27 {/^[^#]/ s/^/#/}" ${dest} > ${dest}.tmp && mv ${dest}.tmp ${dest}
+                #sed "/^# ESPOOLER/,+41 d" ${dest} > ${dest}.tmp && mv ${dest}.tmp ${dest}
+            fi
+
             # Handle Selector options - Delete if not required (sections are 8 and 38 lines respectively)
             if [ "${file}" == "mmu_hardware.cfg" ]; then
                 if [ "$HAS_SELECTOR" == "no" ]; then
                     sed "/^# SELECTOR STEPPER/,+37 d" ${dest} > ${dest}.tmp && mv ${dest}.tmp ${dest}
+                fi
 
-                    if [ "$HAS_SERVO" == "no" ]; then
-                        sed "/^# SELECTOR SERVO/,+7 d" ${dest} > ${dest}.tmp && mv ${dest}.tmp ${dest}
-                    fi
+                if [ "$HAS_SERVO" == "no" ]; then
+                    sed "/^# SELECTOR SERVO/,+7 d" ${dest} > ${dest}.tmp && mv ${dest}.tmp ${dest}
+                fi
 
+                if [ "$_hw_selector_type" == "VirtualSelector" ]; then
                     # Expand out the additional filament drive for each gate
                     additional_gear_section=$(sed -n "/^# ADDITIONAL FILAMENT DRIVE/,+10 p" ${dest} | sed "1,3d")
                     awk '{ print } /^# ADDITIONAL FILAMENT DRIVE/ { for (i=1; i<=11; i++) { getline; print }; exit }' ${dest} > ${dest}.tmp
@@ -903,10 +1154,6 @@ copy_config_files() {
                         cat ${dest} | sed -e "s/^uart_pin: mmu:MMU_GEAR_UART_3/uart_pin: mmu:MMU_GEAR_UART\nuart_address: 3/" > ${dest}.tmp && mv ${dest}.tmp ${dest}
                     fi
                 else
-                    if [ "$HAS_SERVO" == "no" ]; then
-                        sed "/^# SELECTOR SERVO/,+7 d" ${dest} > ${dest}.tmp && mv ${dest}.tmp ${dest}
-                    fi
-
                     # Delete additional gear drivers template section
                     sed "/^# ADDITIONAL FILAMENT DRIVE/,+10 d" ${dest} > ${dest}.tmp && mv ${dest}.tmp ${dest}
                 fi
@@ -938,7 +1185,7 @@ copy_config_files() {
             echo "# SUPPLEMENTAL USER CONFIG retained after upgrade --------------------------------------------------------------------" >> $dest
             echo "#" >> $dest
             supplemental_params="cad_gate0_pos cad_gate_width cad_bypass_offset cad_last_gate_offset cad_block_width cad_bypass_block_width cad_bypass_block_delta cad_selector_tolerance gate_material gate_color gate_spool_id gate_status gate_filament_name gate_temperature gate_speed_override endless_spool_groups tool_to_gate_map"
-            hidden_params="test_random_failures test_random_failures test_disable_encoder test_force_in_print serious"
+            hidden_params="test_random_failures test_random_failures test_disable_encoder test_force_in_print serious suppress_kalico_warning"
             for var in $(set | grep '^_param_' | cut -d'=' -f1 | sort); do
                 param=${var#_param_}
                 for item in ${supplemental_params} ${hidden_params}; do
@@ -1021,6 +1268,16 @@ copy_config_files() {
     done
 }
 
+remove_old_config_files() {
+    mmu_dir="${KLIPPER_CONFIG_HOME}/mmu"
+    if [ -f "${mmu_dir}/addons/dc_espooler.cfg" ]; then
+        echo -e "${WARNING}Removing legacy dc_spooler macros - configuration now in mmu_hardware.cfg"
+        rm -f "${mmu_dir}/addons/dc_espooler.cfg"
+        rm -f "${mmu_dir}/addons/dc_espooler_hw.cfg"
+    fi
+}
+
+
 uninstall_config_files() {
     if [ -d "${KLIPPER_CONFIG_HOME}/mmu" ]; then
         echo -e "${INFO}Removing MMU configuration files from ${KLIPPER_CONFIG_HOME}"
@@ -1049,13 +1306,6 @@ install_printer_includes() {
             fi
             if [ ${ADDONS_BLOBIFIER} -eq 1 ]; then
                 i='\[include mmu/addons/blobifier.cfg\]'
-                already_included=$(grep -c "${i}" ${dest} || true)
-                if [ "${already_included}" -eq 0 ]; then
-                    sed -i "1i ${i}" ${dest}
-                fi
-            fi
-            if [ ${ADDONS_DC_ESPOOLER} -eq 1 ]; then
-                i='\[include mmu/addons/dc_espooler.cfg\]'
                 already_included=$(grep -c "${i}" ${dest} || true)
                 if [ "${already_included}" -eq 0 ]; then
                     sed -i "1i ${i}" ${dest}
@@ -1114,14 +1364,14 @@ install_update_manager() {
         restart=0
 
         update_section=$(grep -c '\[update_manager happy-hare\]' ${file} || true)
-        if [ "${update_section}" -eq 0 ]; then
+        if [ "${update_section}" -eq 0 ] && [ "$OS_TYPE" != "$OS_FLYOS_FAST" ]; then
             echo "" >> "${file}"
             while read -r line; do
                 echo -e "${line}" >> "${file}"
             done < "${SRCDIR}/moonraker_update.txt"
             echo "" >> "${file}"
             # The path for Happy-Hare on MIPS is /usr/data/Happy-Hare
-            if [ "$IS_MIPS" -eq 1 ]; then
+            if [ "$OS_TYPE" = "$OS_CREALITY_K1" ]; then
                 sed -i 's|path: ~/Happy-Hare|path: /usr/data/Happy-Hare|' "${file}"
                 echo -e "${INFO}Update Happy-Hare path for MIPS architecture."
             fi
@@ -1200,12 +1450,12 @@ restart_klipper() {
     if [ "$NOSERVICE" -ne 1 ]; then
         echo -e "${INFO}Restarting Klipper..."
 
-        if [ "$IS_MIPS" -ne 1 ]; then
-            sudo systemctl restart ${KLIPPER_SERVICE}
-        else
+        if [ "$OS_TYPE" = "$OS_CREALITY_K1" ]; then
             set +e
             /etc/init.d/*klipper_service restart
             set -e
+        else
+            sudo systemctl restart ${KLIPPER_SERVICE}
         fi
     else
         echo -e "${WARNING}Klipper restart suppressed - Please restart ${KLIPPER_SERVICE} by hand"
@@ -1216,12 +1466,12 @@ restart_moonraker() {
     if [ "$NOSERVICE" -ne 1 ]; then
         echo -e "${INFO}Restarting Moonraker..."
 
-        if [ "$IS_MIPS" -ne 1 ]; then
-            sudo systemctl restart moonraker
-        else
+        if [ "$OS_TYPE" = "$OS_CREALITY_K1" ]; then
             set +e
             /etc/init.d/*moonraker_service restart
             set -e
+        else
+            sudo systemctl restart moonraker
         fi
     else
         echo -e "${WARNING}Moonraker restart suppressed - Please restart by hand"
@@ -1233,11 +1483,11 @@ prompt_yn() {
         read -n1 -p "$@ (y/n)? " yn
         case "${yn}" in
             Y|y)
-                echo -n "y" 
+                echo -n "y"
                 break
                 ;;
             N|n)
-                echo -n "n" 
+                echo -n "n"
                 break
                 ;;
             *)
@@ -1300,6 +1550,8 @@ questionaire() {
     _hw_color_order="GRBW"
     _hw_has_bypass=0
 
+    HAS_ESPOOLER=no
+
     echo
     echo -e "${INFO}Let me see if I can get you started with initial configuration"
     echo -e "You will still have some manual editing to perform but I will explain that later"
@@ -1307,16 +1559,22 @@ questionaire() {
     echo
     echo -e "${PROMPT}${SECTION}What type of MMU are you running?${INPUT}"
     OPTIONS=()
-    option ERCF11         'ERCF v1.1 (inc TripleDecky, Springy, Binky mods)'
+    option ERCF11         'Enraged Rabbit Carrot Feeder v1.1'
     option ERCF20         'ERCF v2.0'
+    option ERCF30         'ERCF v3.0'
     option TRADRACK       'Tradrack v1.0'
     option ANGRY_BEAVER   'Angry Beaver v1.0'
     option BOX_TURTLE     'Box Turtle v1.0'
     option NIGHT_OWL      'Night Owl v1.0'
+    #option HTLF           'Happy Turtle Lettuce Feeder'
     option _3MS           '3MS (Modular Multi Material System) v1.0'
     option _3D_CHAMELEON  '3D Chameleon'
     option PICO_MMU       'PicoMMU'
-    option QUATTRO_BOX    'QuattroBox'
+    option QUATTRO_BOX    'QuattroBox v1.0'
+    option QUATTRO_BOX11  'QuattroBox v1.1'
+    option MMX            'MMX'
+    option VVD            'BigTreeTech ViViD (BETA)'
+    option KMS            'KMS'
     option OTHER          'Other / Custom (or just want starter config files)'
     prompt_option opt 'MMU Type' "${OPTIONS[@]}"
     case $opt in
@@ -1334,6 +1592,7 @@ questionaire() {
             _hw_gear_gear_ratio="80:20"
             _hw_gear_run_current=0.5
             _hw_gear_hold_current=0.1
+            _hw_sel_gear_ratio="1:1"
             _hw_sel_run_current=0.4
             _hw_sel_hold_current=0.2
             _hw_encoder_resolution=0.7059
@@ -1384,12 +1643,40 @@ questionaire() {
             _hw_gear_gear_ratio="80:20"
             _hw_gear_run_current=0.5
             _hw_gear_hold_current=0.1
+            _hw_sel_gear_ratio="1:1"
             _hw_sel_run_current=0.4
             _hw_sel_hold_current=0.2
             _hw_encoder_resolution=1.0
             _param_extruder_homing_endstop="collision"
             _param_gate_homing_endstop="encoder"
             _param_gate_parking_distance=13 # ThumperBlocks is 11
+            _param_servo_buzz_gear_on_down=3
+            _param_servo_duration=0.4
+            _param_servo_always_active=0
+            _param_servo_buzz_gear_on_down=1
+            ;;
+
+        "$ERCF30")
+            HAS_ENCODER=yes
+            HAS_SELECTOR=yes
+            HAS_SERVO=yes
+            _hw_mmu_vendor="ERCF"
+            _hw_mmu_version="2.5"
+            _hw_selector_type=LinearSelector
+            _hw_variable_bowden_lengths=0
+            _hw_variable_rotation_distances=1
+            _hw_require_bowden_move=1
+            _hw_filament_always_gripped=0
+            _hw_gear_gear_ratio="1:1"
+            _hw_gear_run_current=0.8
+            _hw_gear_hold_current=0.2
+            _hw_sel_gear_ratio="1:1"
+            _hw_sel_run_current=0.7
+            _hw_sel_hold_current=0.2
+            _hw_encoder_resolution=1.0
+            _param_extruder_homing_endstop="collision"
+            _param_gate_homing_endstop="encoder"
+            _param_gate_parking_distance=16
             _param_servo_buzz_gear_on_down=3
             _param_servo_duration=0.4
             _param_servo_always_active=0
@@ -1410,6 +1697,7 @@ questionaire() {
             _hw_gear_gear_ratio="50:17"
             _hw_gear_run_current=1.27
             _hw_gear_hold_current=0.2
+            _hw_sel_gear_ratio="1:1"
             _hw_sel_run_current=0.63
             _hw_sel_hold_current=0.2
             _param_extruder_homing_endstop="none"
@@ -1451,6 +1739,7 @@ questionaire() {
             _param_extruder_homing_endstop="extruder"
             _param_gate_homing_endstop="extruder"
             _param_gate_homing_max=500
+            _param_gate_preload_homing_max=500
             _param_gate_parking_distance=50
             _param_gear_homing_speed=80
             _param_has_filament_buffer=0
@@ -1460,7 +1749,7 @@ questionaire() {
             HAS_ENCODER=no
             HAS_SELECTOR=no
             HAS_SERVO=no
-            ADDONS_DC_ESPOOLER=1
+            HAS_ESPOOLER=yes
             _hw_mmu_vendor="BoxTurtle"
             _hw_mmu_version="1.0"
             _hw_selector_type=VirtualSelector
@@ -1480,9 +1769,16 @@ questionaire() {
             _param_gate_final_eject_distance=100
             _param_has_filament_buffer=0
 
-            # Macro variable config
-            _param_espooler_start_macro="MMU_ESPOOLER_START"
-            _param_espooler_stop_macro="MMU_ESPOOLER_STOP"
+            _param_autocal_bowden_length=1
+            _param_autotune_bowden_length=0
+            _param_skip_cal_rotation_distance=0
+            _param_autotune_rotation_distance=1
+            _param_skip_cal_encoder=0
+            _param_autotune_encoder=0
+
+            _param_sync_feedback_enabled=1
+            _param_sync_feedback_buffer_range=8
+            _param_sync_feedback_buffer_maxrange=12
             ;;
 
         "$NIGHT_OWL")
@@ -1509,12 +1805,20 @@ questionaire() {
             _param_has_filament_buffer=0
             ;;
 
+        "$HTLF")
+            # Comming soon (j/k)...
+            HAS_ENCODER=no
+            HAS_SELECTOR=no
+            HAS_SERVO=yes
+            ;;
+
         "$_3MS")
             HAS_ENCODER=no
             HAS_SELECTOR=no
             HAS_SERVO=no
             HELP_URL="https://github.com/moggieuk/Happy-Hare/wiki/Quick-Start-3MS"
             HELP_URL_B="https://3dcoded.github.io/3MS/instructions/"
+
             _hw_mmu_vendor="3MS"
             _hw_mmu_version="1.0"
             _hw_selector_type=VirtualSelector
@@ -1525,6 +1829,7 @@ questionaire() {
             _hw_gear_gear_ratio="1:1"
             _hw_gear_run_current=0.7
             _hw_gear_hold_current=0.1
+
             _param_extruder_homing_endstop="extruder"
             _param_gate_homing_endstop="extruder"
             _param_gate_homing_max=500
@@ -1537,6 +1842,7 @@ questionaire() {
             HAS_SELECTOR=yes
             HAS_SERVO=no
             SETUP_SELECTOR_TOUCH=no
+
             _hw_mmu_vendor="3DChameleon"
             _hw_mmu_version="1.0"
             _hw_selector_type=RotarySelector
@@ -1547,8 +1853,10 @@ questionaire() {
             _hw_gear_gear_ratio="1:1"
             _hw_gear_run_current=0.7
             _hw_gear_hold_current=0.1
+            _hw_sel_gear_ratio="1:1"
             _hw_sel_run_current=0.63
             _hw_sel_hold_current=0.2
+
             _param_extruder_homing_endstop="none"
             _param_gate_homing_endstop="mmu_gate"
             _param_gate_homing_max=500
@@ -1561,14 +1869,15 @@ questionaire() {
             HAS_SELECTOR=no
             HAS_SERVO=yes
             SETUP_SELECTOR_TOUCH=no
+
             _hw_mmu_vendor="PicoMMU"
             _hw_mmu_version="1.0"
             _hw_selector_type=ServoSelector
             _hw_variable_bowden_lengths=0
             _hw_variable_rotation_distances=0
             _hw_require_bowden_move=1
-            _hw_filament_always_gripped=1
-            _hw_gear_gear_ratio="1.28:1"
+            _hw_filament_always_gripped=0
+            _hw_gear_gear_ratio="1.25:1"
             _hw_gear_run_current=0.7
             _hw_gear_hold_current=0.1
             _hw_chain_count=4
@@ -1576,6 +1885,7 @@ questionaire() {
             _hw_entry_leds=""
             _hw_status_leds=""
             _hw_logo_leds=""
+
             _param_extruder_homing_endstop="none"
             _param_gate_homing_endstop="mmu_gate"
             _param_gate_homing_max=100
@@ -1623,12 +1933,162 @@ questionaire() {
             variable_default_logo_effect='1, 0.15, 0.66'
             ;;
 
+        "$QUATTRO_BOX11")
+            HAS_ENCODER=yes
+            HAS_SELECTOR=no
+            HAS_SERVO=no
+            ADDONS_EJECT_BUTTONS=1
+
+            # mmu_hardware config
+            _hw_mmu_vendor="QuattroBox"
+            _hw_mmu_version="1.0"
+            _hw_selector_type=VirtualSelector
+            _hw_variable_bowden_lengths=0
+            _hw_variable_rotation_distances=1
+            _hw_require_bowden_move=1
+            _hw_filament_always_gripped=1
+            _hw_gear_gear_ratio="50:17"
+            _hw_gear_run_current=1.27
+            _hw_gear_hold_current=0.2
+            _hw_chain_count=36
+            _hw_color_order="GRBW,GRBW,GRBW,GRBW,GRBW,GRBW,GRBW,GRBW,GRB,GRB,GRB,GRB,GRB,GRB,GRB,GRB,GRB,GRB,GRB,GRB,GRB,GRB,GRB,GRB,GRB,GRB,GRB,GRB,GRB,GRB,GRB,GRB,GRB,GRB,GRB,GRB"
+            _hw_exit_leds="neopixel:mmu_leds (2,4,6,8)"
+            _hw_entry_leds="neopixel:mmu_leds (1,3,5,7)"
+            _hw_status_leds="neopixel:mmu_leds (9-36)"
+
+            # mmu_parameters config
+            _param_extruder_homing_endstop="collision"
+            _param_gate_homing_endstop="mmu_gate"
+            _param_gate_homing_max=200
+            _param_gate_preload_homing_max=200
+            _param_gate_unload_buffer=50
+            _param_gate_parking_distance=30
+            _param_gate_endstop_to_encoder=18
+            _param_gate_autoload=1
+            _param_gate_final_eject_distance=200
+            _param_has_filament_buffer=0
+
+            # mmu_macro_vars config
+            variable_default_exit_effect="gate_status_exit"
+            variable_default_entry_effect="gate_status"
+            variable_default_status_effect="filament_color"
+            ;;
+
+        "$MMX")
+            HAS_ENCODER=no
+            HAS_SELECTOR=no
+            HAS_SERVO=yes
+            SETUP_SELECTOR_TOUCH=no
+
+            _hw_mmu_vendor="MMX"
+            _hw_mmu_version="1.0"
+            _hw_selector_type=ServoSelector
+            _hw_variable_bowden_lengths=0
+            _hw_variable_rotation_distances=0
+            _hw_require_bowden_move=1
+            _hw_filament_always_gripped=1
+            _hw_gear_gear_ratio="80:20"
+            _hw_gear_run_current=0.7
+            _hw_gear_hold_current=0.1
+            _hw_chain_count=4
+            _hw_exit_leds="neopixel:mmu_leds (4-1)"
+            _hw_entry_leds=""
+            _hw_status_leds=""
+            _hw_logo_leds=""
+
+            _param_extruder_homing_endstop="none"
+            _param_gate_homing_endstop="mmu_gate"
+            _param_gate_homing_max=1000
+            _param_gate_preload_homing_max=1000
+            _param_gate_parking_distance=25
+            _param_gear_homing_speed=80
+            _param_selector_gate_angles="60,0,180,120"
+            ;;
+
+        "$VVD")
+            # Comming soon (Bigtreetech)...
+            HAS_ENCODER=no
+            HAS_SELECTOR=yes
+            HAS_SERVO=no
+            HAS_ESPOOLER=yes
+            SETUP_LED=yes
+            # Note VVD has preconfigured mmu_hardware.cfg based on dedicated electronics
+            _hw_num_gates=4
+            _hw_mmu_vendor="VVD"
+            _hw_mmu_version="1.0"
+            _hw_selector_type=IndexedSelector
+
+            # mmu_parameters config
+            _param_extruder_homing_endstop="filament_compression"
+            _param_extruder_homing_max=250
+            _param_extruder_homing_buffer=80
+            _param_gate_homing_endstop="mmu_gear"
+            _param_gate_homing_max=250
+            _param_gate_unload_buffer=80
+            _param_gate_parking_distance=30
+            _param_gate_preload_homing_max=750
+            _param_gate_preload_parking_distance=30
+            _param_gate_final_eject_distance=750
+            _param_gate_autoload=1
+            _param_has_filament_buffer=0
+
+            _param_autocal_bowden_length=1
+            _param_autotune_bowden_length=0
+            _param_skip_cal_rotation_distance=1
+            _param_autotune_rotation_distance=1
+
+            _param_sync_feedback_enabled=1
+            _param_sync_feedback_buffer_range=8
+            _param_sync_feedback_buffer_maxrange=12
+
+            _param_update_aht10_commands=1
+            ;;
+
+        "$KMS")
+            HAS_ENCODER=yes
+            HAS_SELECTOR=no
+            HAS_SERVO=no
+            HAS_ESPOOLER=yes
+            SETUP_LED=yes
+            # Note KMS has preconfigured mmu_hardware.cfg based on dedicated electronics
+            _hw_num_gates=4
+            _hw_mmu_vendor="KMS"
+            _hw_mmu_version="1.0"
+            _hw_selector_type=VirtualSelector
+
+            # mmu_parameters config
+            _param_extruder_homing_endstop="filament_compression"
+            _param_gate_homing_endstop="mmu_gate"
+            _param_gate_homing_max=300
+            _param_gate_preload_homing_max=300
+            _param_gate_preload_parking_distance=-10
+            _param_gate_parking_distance=20
+            _param_gate_unload_buffer=50
+            _param_gate_endstop_to_encoder=14
+            _param_gate_autoload=1
+            _param_gate_final_eject_distance=300  
+            _param_has_filament_buffer=0
+
+            _param_autocal_bowden_length=1
+            _param_autotune_bowden_length=0
+            _param_skip_cal_rotation_distance=0
+            _param_autotune_rotation_distance=1
+            _param_skip_cal_encoder=0
+            _param_autotune_encoder=0
+
+            _param_sync_feedback_enabled=1
+            _param_sync_feedback_buffer_range=8
+            _param_sync_feedback_buffer_maxrange=12
+            ;;
+
         *)
             HAS_ENCODER=yes
             HAS_SELECTOR=yes
             HAS_SERVO=yes
+            HAS_ESPOOLER=yes
             SETUP_LED=yes
             SETUP_SELECTOR_TOUCH=no
+
             _hw_mmu_vendor="Other"
             _hw_mmu_version="1.0"
             _hw_selector_type=LinearSelector
@@ -1639,6 +2099,7 @@ questionaire() {
             _hw_gear_gear_ratio="1:1"
             _hw_gear_run_current=0.7
             _hw_gear_hold_current=0.1
+            _hw_sel_gear_ratio="1:1"
             _hw_sel_run_current=0.5
             _hw_sel_hold_current=0.1
 
@@ -1647,6 +2108,7 @@ questionaire() {
             OPTIONS=() # reset option array
             option TYPE_A_WITH_ENCODER                            'Type-A (selector) with Encoder'
             option TYPE_A_NO_ENCODER                              'Type-A (selector), No Encoder'
+            option TYPE_A_NO_ENCODER_NO_SERVO_NO_ESPOOLER         'Type-A (selector), No Encoder, No Servo, No ESpooler'
             option TYPE_B_WITH_ENCODER                            'Type-B (mutliple filament drive steppers) with Encoder'
             option TYPE_B_WITH_SHARED_GATE_AND_ENCODER            'Type-B (multiple filament drive steppers) with shared Gate sensor and Encoder'
             option TYPE_B_WITH_SHARED_GATE_NO_ENCODER             'Type-B (multiple filament drive steppers) with shared Gate sensor, No Encoder'
@@ -1663,6 +2125,15 @@ questionaire() {
                     ;;
                 "$TYPE_A_NO_ENCODER")
                     HAS_ENCODER=no
+                    _param_gate_homing_endstop="mmu_gate"
+                    _param_extruder_homing_endstop="none"
+                    echo
+                    echo -e "${WARNING}    IMPORTANT: Since you have a custom MMU with selector you will need to setup some CAD dimensions in mmu_parameters.cfg... See doc"
+                    ;;
+                "$TYPE_A_NO_ENCODER_NO_SERVO_NO_ESPOOLER")
+                    HAS_ENCODER=no
+                    HAS_SERVO=no
+                    HAS_ESPOOLER=no
                     _param_gate_homing_endstop="mmu_gate"
                     _param_extruder_homing_endstop="none"
                     echo
@@ -1713,6 +2184,7 @@ questionaire() {
                     HAS_SELECTOR=no
                     HAS_SERVO=no
                     HAS_ENCODER=no
+                    HAS_ESPOOLER=yes
                     _hw_selector_type=VirtualSelector
                     _hw_variable_bowden_lengths=1
                     _hw_variable_rotation_distances=1
@@ -1728,278 +2200,372 @@ questionaire() {
             ;;
         esac
 
-    echo -e "${PROMPT}${SECTION}How many gates (selectors) do you have?${INPUT}"
-    _hw_num_gates=$(prompt_123 "Number of gates")
-
-    _hw_brd_type="unknown"
-    echo -e "${PROMPT}${SECTION}Select mcu board type used to control MMU${INPUT}"
-    # Perhaps consider just supporting the BTT MMB (and eventually AFC) when mmu_vendor is BoxTurtle
-    # as many of these other boards may not work (due lack of exposed gpio)
-    OPTIONS=()
-    option MMB10                'BTT MMB v1.0 (with CANbus)'
-    option MMB11                'BTT MMB v1.1 (with CANbus)'
-    option MMB20                'BTT MMB v2.0 (with CANbus)'
-    option FYSETC_BURROWS_ERB_1 'Fysetc Burrows ERB v1'
-    option FYSETC_BURROWS_ERB_2 'Fysetc Burrows ERB v2'
-    option EASY_BRD_SAMD21      'Standard EASY-BRD (with SAMD21)'
-    option EASY_BRD_RP2040      'EASY-BRD with RP2040'
-    option MELLOW_BRD_1         'Mellow EASY-BRD v1.x (with CANbus)'
-    option MELLOW_BRD_2         'Mellow EASY-BRD v2.x (with CANbus)'
-    option AFC_LITE_1           'AFC Lite v1.0'
-    option SKR_PICO_1 'BTT SKR Pico v1.0'
-    option OTHER                'Not in list / Unknown'
-    prompt_option opt 'MCU Type' "${OPTIONS[@]}"
-    case $opt in
-        "$MMB10")
-            _hw_brd_type="MMB10"
-            pattern="Klipper_stm32"
-            ;;
-        "$MMB11")
-            _hw_brd_type="MMB11"
-            pattern="Klipper_stm32"
-            ;;
-        "$MMB20")
-            _hw_brd_type="MMB20"
-            pattern="Klipper_stm32"
-            ;;
-        "$FYSETC_BURROWS_ERB_1")
-            _hw_brd_type="ERB"
-            pattern="Klipper_rp2040"
-            ;;
-        "$FYSETC_BURROWS_ERB_2")
-            _hw_brd_type="ERBv2"
-            pattern="Klipper_rp2040"
-            ;;
-        "$EASY_BRD_SAMD21")
-            _hw_brd_type="EASY-BRD"
-            pattern="Klipper_samd21"
-            ;;
-        "$EASY_BRD_RP2040")
-            _hw_brd_type="EASY-BRD-RP2040"
-            pattern="Klipper_rp2040"
-            ;;
-        "$MELLOW_BRD_1")
-            _hw_brd_type="MELLOW-EASY-BRD-CAN"
-            pattern="Klipper_rp2040"
-            ;;
-        "$MELLOW_BRD_2")
-            _hw_brd_type="MELLOW-EASY-BRD-CANv2"
-            pattern="Klipper_rp2040"
-            ;;
-        "$AFC_LITE_1")
-            _hw_brd_type="AFC_LITE_1"
-            pattern="Klipper_stm32"
-            ;;
-        "$SKR_PICO_1")
-            _hw_brd_type="SKR_PICO_1"
-            pattern="Klipper_rp2040"
-            ;;
-        *)
-            _hw_brd_type="unknown"
-            pattern="Klipper_"
-            ;;
-    esac
-
-    for line in `ls /dev/serial/by-id 2>/dev/null | grep -E "Klipper_"`; do
-        if echo ${line} | grep --quiet "${pattern}"; then
-            echo -e "${PROMPT}${SECTION}This looks like your ${EMPHASIZE}${_hw_brd_type}${PROMPT} controller serial port. Is that correct?${INPUT}"
-            yn=$(prompt_yn "/dev/serial/by-id/${line}")
-            echo
-            case $yn in
-                y)
-                    _hw_serial="/dev/serial/by-id/${line}"
-                    break
-                    ;;
-                n)
-                    ;;
-            esac
-        fi
-    done
-    if [ "${_hw_serial}" == "" ]; then
-        echo
-        echo -e "${WARNING}    Couldn't find your serial port, but no worries - I'll configure the default and you can manually change later"
-        _hw_serial='/dev/ttyACM1 # Config guess. Run ls -l /dev/serial/by-id and set manually'
+    if [ "${_hw_mmu_vendor}" != "KMS" -a "${_hw_mmu_vendor}" != "VVD" ]; then
+        echo -e "${PROMPT}${SECTION}How many gates (lanes) do you have?${INPUT}"
+        _hw_num_gates=$(prompt_123 "Number of gates")
     fi
 
-    # Avoid pin duplication. Most type-A MMU's have either encoder or gate. If both, user will have to fix
-    if [ "${HAS_ENCODER}" == "yes" ]; then
-        eval PIN[${_hw_brd_type},gate_sensor_pin]=""
+    if [ "${_hw_mmu_vendor}" == "KMS" ]; then
+        pattern="Klipper_stm32"
+        for line in `ls /dev/serial/by-id 2>/dev/null | grep -E "Klipper_"`; do
+            if echo ${line} | grep -q "${pattern}"; then
+                echo -e "${PROMPT}${SECTION}Is '/dev/serial/by-id/${line}' a ${EMPHASIZE}KMS${PROMPT} controller serial port?${INPUT}"
+                OPTIONS=()
+                option KMS     'KMS MMU'
+                option BUFFER  'KMS Buffer (sync-feedback sensor)'
+                option NEITHER 'No, not related to KMS'
+                prompt_option opt 'KMS MCU?' "${OPTIONS[@]}"
+                case $opt in
+                    "$KMS")
+                        _hw_serial1="/dev/serial/by-id/${line}"
+                        ;;
+                    "$BUFFER")
+                        _hw_serial2="/dev/serial/by-id/${line}"
+                        ;;
+                    *)
+                        ;;
+                esac
+            fi
+        done
+        if [ "${_hw_serial1}" == "" ]; then
+            echo
+            echo -e "${WARNING}    Couldn't find your MMU serial port, but no worries - I'll configure the default and you can manually change later"
+            _hw_serial1='/dev/ttyACM1 # Config guess. Run ls -l /dev/serial/by-id and set manually'
+        fi
+        if [ "${_hw_serial2}" == "" ]; then
+            echo
+            echo -e "${WARNING}    Couldn't find your Bufffer (sync-feedback sensor) serial port, but no worries - I'll configure the default and you can manually change later"
+            _hw_serial1='/dev/ttyACM2 # Config guess. Run ls -l /dev/serial/by-id and set manually'
+        fi
+
+    elif [ "${_hw_mmu_vendor}" == "VVD" ]; then
+        pattern="Klipper_stm32"
+        for line in `ls /dev/serial/by-id 2>/dev/null | grep -E "Klipper_"`; do
+            if echo ${line} | grep -q "${pattern}"; then
+                echo -e "${PROMPT}${SECTION}Is '/dev/serial/by-id/${line}' a ${EMPHASIZE}KMS${PROMPT} controller serial port?${INPUT}"
+                OPTIONS=()
+                option VVD     'ViVid MMU'
+                option BUFFER  'ViViD Buffer (sync-feedback sensor)'
+                option NEITHER 'No, not related to ViViD'
+                prompt_option opt 'ViViD MCU?' "${OPTIONS[@]}"
+                case $opt in
+                    "$VVD")
+                        _hw_serial1="/dev/serial/by-id/${line}"
+                        ;;
+                    "$BUFFER")
+                        _hw_serial2="/dev/serial/by-id/${line}"
+                        ;;
+                    *)
+                        ;;
+                esac
+            fi
+        done
+        if [ "${_hw_serial1}" == "" ]; then
+            echo
+            echo -e "${WARNING}    Couldn't find your MMU serial port, but no worries - I'll configure the default and you can manually change later"
+            _hw_serial1='/dev/ttyACM1 # Config guess. Run ls -l /dev/serial/by-id and set manually'
+        fi
+        if [ "${_hw_serial2}" == "" ]; then
+            echo
+            echo -e "${WARNING}    Couldn't find your Bufffer (sync-feedback sensor) serial port, but no worries - I'll configure the default and you can manually change later"
+            _hw_serial1='/dev/ttyACM2 # Config guess. Run ls -l /dev/serial/by-id and set manually'
+        fi
+
     else
-        eval PIN[${_hw_brd_type},encoder_pin]=""
-    fi
+        _hw_brd_type="unknown"
+        echo -e "${PROMPT}${SECTION}Select mcu board type used to control MMU${INPUT}"
+        # Perhaps consider just supporting the BTT MMB (and eventually AFC) when mmu_vendor is BoxTurtle
+        # as many of these other boards may not work (due lack of exposed gpio)
+        OPTIONS=()
+        option MMB10                'BTT MMB v1.0 (with CANbus)'
+        option MMB11                'BTT MMB v1.1 (with CANbus)'
+        option MMB20                'BTT MMB v2.0 (with CANbus)'
+        option FYSETC_BURROWS_ERB_1 'Fysetc Burrows ERB v1'
+        option FYSETC_BURROWS_ERB_2 'Fysetc Burrows ERB v2'
+        option EASY_BRD_SAMD21      'Standard EASY-BRD (with SAMD21)'
+        option EASY_BRD_RP2040      'EASY-BRD with RP2040'
+        option MELLOW_BRD_1         'Mellow EASY-BRD v1.x (with CANbus)'
+        option MELLOW_BRD_2         'Mellow EASY-BRD v2.x (with CANbus)'
+		option TZB_1                'TZB v1.0'
+        option AFC_LITE_1           'AFC Lite v1.0'
+        option WGB_3                'WGB v3.0'
+        option SKR_PICO_1           'BTT SKR Pico v1.0'
+        option EBB42_12             'BTT EBB 42 CANbus v1.2 (for MMX or Pico)'
+        option OTHER                'Not in list / Unknown'
+        prompt_option opt 'MCU Type' "${OPTIONS[@]}"
+        case $opt in
+            "$MMB10")
+                _hw_brd_type="MMB10"
+                pattern="Klipper_stm32"
+                ;;
+            "$MMB11")
+                _hw_brd_type="MMB11"
+                pattern="Klipper_stm32"
+                ;;
+            "$MMB20")
+                _hw_brd_type="MMB20"
+                pattern="Klipper_stm32"
+                ;;
+            "$FYSETC_BURROWS_ERB_1")
+                _hw_brd_type="ERB"
+                pattern="Klipper_rp2040"
+                ;;
+            "$FYSETC_BURROWS_ERB_2")
+                _hw_brd_type="ERBv2"
+                pattern="Klipper_rp2040"
+                ;;
+            "$EASY_BRD_SAMD21")
+                _hw_brd_type="EASY-BRD"
+                pattern="Klipper_samd21"
+                ;;
+            "$EASY_BRD_RP2040")
+                _hw_brd_type="EASY-BRD-RP2040"
+                pattern="Klipper_rp2040"
+                ;;
+            "$MELLOW_BRD_1")
+                _hw_brd_type="MELLOW-EASY-BRD-CAN"
+                pattern="Klipper_rp2040"
+                ;;
+            "$MELLOW_BRD_2")
+                _hw_brd_type="MELLOW-EASY-BRD-CANv2"
+                pattern="Klipper_rp2040"
+                ;;
+			"$TZB_1")
+                _hw_brd_type="TZB_1"
+                pattern="Klipper_stm32"
+                ;;	
+            "$AFC_LITE_1")
+                _hw_brd_type="AFC_LITE_1"
+                pattern="Klipper_stm32"
+                ;;
+            "$WGB_3")
+                _hw_brd_type="WGB_3"
+                pattern="Klipper_stm32"
+                ;;
+            "$SKR_PICO_1")
+                _hw_brd_type="SKR_PICO_1"
+                pattern="Klipper_rp2040"
+                ;;
+            "$EBB42_12")
+                _hw_brd_type="EBB42_12"
+                pattern="Klipper_"
+                ;;
+            *)
+                _hw_brd_type="unknown"
+                pattern="Klipper_"
+                ;;
+        esac
 
-    echo -e "${PROMPT}${SECTION}Would you like to have neopixel LEDs setup now for your MMU?${INPUT}"
-    yn=$(prompt_yn "Enable LED support?")
-    echo
-    case $yn in
-        y)
-            SETUP_LED=yes
-            ;;
-        n)
-            SETUP_LED=no
-            ;;
-    esac
-
-    if [ "${HAS_SELECTOR}" == "yes" ]; then
-
-        if [ "$SETUP_SELECTOR_TOUCH" != "no" ]; then
-            echo -e "${PROMPT}${SECTION}Touch selector operation using TMC Stallguard? This allows for additional selector recovery steps but is difficult to tune"
-            echo -e "Not recommend if you are new to MMU/Happy Hare & MCU must have DIAG output for selector stepper. Can configure later${INPUT}"
-            yn=$(prompt_yn "Enable selector touch operation")
+        for line in `ls /dev/serial/by-id 2>/dev/null | grep -E "Klipper_"`; do
+            if echo ${line} | grep -q "${pattern}"; then
+                echo -e "${PROMPT}${SECTION}This looks like your ${EMPHASIZE}${_hw_brd_type}${PROMPT} controller serial port. Is that correct?${INPUT}"
+                yn=$(prompt_yn "/dev/serial/by-id/${line}")
+                echo
+                case $yn in
+                    y)
+                        _hw_serial="/dev/serial/by-id/${line}"
+                        break
+                        ;;
+                    n)
+                        ;;
+                esac
+            fi
+        done
+        if [ "${_hw_serial}" == "" ]; then
             echo
-            case $yn in
-                y)
-                    if [ "${_hw_brd_type}" == "EASY-BRD" ]; then
-                        echo
-                        echo -e "${WARNING}    IMPORTANT: Set the J6 jumper pins to 2-3 and 4-5, i.e. .[..][..]  MAKE A NOTE NOW!!"
-                    fi
-                    SETUP_SELECTOR_TOUCH=yes
-                    ;;
-                n)
-                    if [ "${_hw_brd_type}" == "EASY-BRD" ]; then
-                        echo
-                        echo -e "${WARNING}    IMPORTANT: Set the J6 jumper pins to 1-2 and 4-5, i.e. [..].[..]  MAKE A NOTE NOW!!"
-                    fi
-                    SETUP_SELECTOR_TOUCH=no
-                    ;;
-            esac
+            echo -e "${WARNING}    Couldn't find your serial port, but no worries - I'll configure the default and you can manually change later"
+            _hw_serial='/dev/ttyACM1 # Config guess. Run ls -l /dev/serial/by-id and set manually'
         fi
 
-        if [ "$SETUP_SELECTOR_TOUCH" == "no" ]; then
-            echo -e "${PROMPT}${SECTION}Selector homing using TMC Stallguard? This prevents the need for hard endstop homing but must be tuned"
-            echo -e "MCU must have DIAG output for selector stepper. Can configure later${INPUT}"
-            yn=$(prompt_yn "Enable selector stallguard homing")
-            echo
-            case $yn in
-                y)
-                    SETUP_SELECTOR_STALLGUARD_HOMING=yes
-                    ;;
-                n)
-                    SETUP_SELECTOR_STALLGUARD_HOMING=no
-                    ;;
-            esac
-        fi
-    fi
-
-    if [ "${HAS_SERVO}" == "yes" ]; then
-
-        if [ "${_hw_mmu_vendor}" == "ERCF" ]; then
-            echo -e "${PROMPT}${SECTION}Which servo are you using?${INPUT}"
-            OPTIONS=()
-            option MG90S    'MG-90S'
-            option SH0255MG 'Savox SH0255MG'
-            option DS041MG  'GDW DS041MG'
-            option OTHER    'Not listed / Other'
-            prompt_option opt 'Servo' "${OPTIONS[@]}"
-            case $opt in
-                "$MG90S")
-                    _hw_maximum_servo_angle=180
-                    _hw_minimum_pulse_width=0.00085
-                    _hw_maximum_pulse_width=0.00215
-                    _param_servo_always_active=0
-                    _param_servo_up_angle=30
-                    if [ "${_hw_mmu_version}" == "2.0" ]; then
-                        _param_servo_move_angle=61
-                    else
-                        _param_servo_move_angle=${_param_servo_up_angle}
-                    fi
-                    _param_servo_down_angle=140
-                    ;;
-                "$SH0255MG")
-                    _hw_maximum_servo_angle=180
-                    _hw_minimum_pulse_width=0.00085
-                    _hw_maximum_pulse_width=0.00215
-                    _param_servo_always_active=0
-                    _param_servo_up_angle=140
-                    if [ "${_hw_mmu_version}" == "2.0" ]; then
-                        _param_servo_move_angle=109
-                    else
-                        _param_servo_move_angle=${_param_servo_up_angle}
-                    fi
-                    _param_servo_down_angle=30
-                    ;;
-                "$DS041MG")
-                    _hw_maximum_servo_angle=180
-                    _hw_minimum_pulse_width=0.00050
-                    _hw_maximum_pulse_width=0.00250
-                    _param_servo_always_active=1
-                    _param_servo_up_angle=30
-                    if [ "${_hw_mmu_version}" == "2.0" ]; then
-                        _param_servo_move_angle=50
-                    else
-                        _param_servo_move_angle=${servo_up_angle}
-                    fi
-                    _param_servo_down_angle=100
-                    ;;
-                *)
-                    _hw_maximum_servo_angle=180
-                    _hw_minimum_pulse_width=0.00085
-                    _hw_maximum_pulse_width=0.00215
-                    _param_servo_always_active=0
-                    ;;
-            esac
-
-        elif [ "${_hw_mmu_vendor}" == "Tradrack" ]; then
-            echo -e "${PROMPT}${SECTION}Which servo are you using?${INPUT}"
-            OPTIONS=()
-            option TRADRACK_BOM 'PS-1171MG or FT1117M (Tradrack)'
-            option OTHER 'Not listed / Other'
-            prompt_option opt 'Servo' "${OPTIONS[@]}"
-            case $opt in
-                "$TRADRACK_BOM")
-                    _hw_maximum_servo_angle=131
-                    _hw_minimum_pulse_width=0.00070
-                    _hw_maximum_pulse_width=0.00220
-                    _param_servo_always_active=1
-                    _param_servo_up_angle=145
-                    _param_servo_move_angle=${servo_up_angle}
-                    _param_servo_down_angle=1
-                    ;;
-                *)
-                    _hw_maximum_servo_angle=131
-                    _hw_minimum_pulse_width=0.00070
-                    _hw_maximum_pulse_width=0.00230
-                    _param_servo_always_active=1
-                    _param_servo_up_angle=145
-                    _param_servo_move_angle=${servo_up_angle}
-                    _param_servo_down_angle=1
-                    ;;
-            esac
-
-        elif [ "${_hw_mmu_vendor}" == "PicoMMU" ]; then
-            echo -e "${PROMPT}${SECTION}Which servo are you using?${INPUT}"
-            OPTIONS=()
-            option PICOMMU_BOM 'MG996R'
-            option OTHER 'Not listed / Other'
-            prompt_option opt 'Servo' "${OPTIONS[@]}"
-            case $opt in
-                "$PICOMMU_BOM")
-                    _hw_maximum_servo_angle=180
-                    _hw_minimum_pulse_width=0.00070
-                    _hw_maximum_pulse_width=0.00230
-                    _param_servo_always_active=0
-                    _param_servo_duration=0.6
-                    _param_servo_dwell=1.0
-                    ;;
-                *)
-                    _hw_maximum_servo_angle=180
-                    _hw_minimum_pulse_width=0.001
-                    _hw_maximum_pulse_width=0.002
-                    _param_servo_always_active=1
-                    _param_servo_duration=0.6
-                    _param_servo_dwell=1.0
-                    ;;
-            esac
-
+        # Avoid pin duplication. Most type-A MMU's have either encoder or gate. If both, user will have to fix
+        if [ "${HAS_ENCODER}" == "yes" ]; then
+            eval PIN[${_hw_brd_type},gate_sensor_pin]=""
         else
-            # Other (unknown) vendor
-            _hw_maximum_servo_angle=180
-            _hw_minimum_pulse_width=0.001
-            _hw_maximum_pulse_width=0.002
-            _param_servo_always_active=0
-            _param_servo_up_angle=0
-            _param_servo_move_angle=0
-            _param_servo_down_angle=0
+            eval PIN[${_hw_brd_type},encoder_pin]=""
+        fi
+
+        echo -e "${PROMPT}${SECTION}Would you like to have neopixel LEDs setup now for your MMU?${INPUT}"
+        yn=$(prompt_yn "Enable LED support?")
+        echo
+        case $yn in
+            y)
+                SETUP_LED=yes
+                ;;
+            n)
+                SETUP_LED=no
+                ;;
+        esac
+
+        if [ "${HAS_SELECTOR}" == "yes" ]; then
+
+            if [ "$SETUP_SELECTOR_TOUCH" != "no" ]; then
+                echo -e "${PROMPT}${SECTION}Touch selector operation using TMC Stallguard? This allows for additional selector recovery steps but is difficult to tune"
+                echo -e "Not recommend if you are new to MMU/Happy Hare & MCU must have DIAG output for selector stepper. Can configure later${INPUT}"
+                yn=$(prompt_yn "Enable selector touch operation")
+                echo
+                case $yn in
+                    y)
+                        if [ "${_hw_brd_type}" == "EASY-BRD" ]; then
+                            echo
+                            echo -e "${WARNING}    IMPORTANT: Set the J6 jumper pins to 2-3 and 4-5, i.e. .[..][..]  MAKE A NOTE NOW!!"
+                        fi
+                        SETUP_SELECTOR_TOUCH=yes
+                        ;;
+                    n)
+                        if [ "${_hw_brd_type}" == "EASY-BRD" ]; then
+                            echo
+                            echo -e "${WARNING}    IMPORTANT: Set the J6 jumper pins to 1-2 and 4-5, i.e. [..].[..]  MAKE A NOTE NOW!!"
+                        fi
+                        SETUP_SELECTOR_TOUCH=no
+                        ;;
+                esac
+            fi
+
+            if [ "$SETUP_SELECTOR_TOUCH" == "no" ]; then
+                echo -e "${PROMPT}${SECTION}Selector homing using TMC Stallguard? This prevents the need for hard endstop homing but must be tuned"
+                echo -e "MCU must have DIAG output for selector stepper. Can configure later${INPUT}"
+                yn=$(prompt_yn "Enable selector stallguard homing")
+                echo
+                case $yn in
+                    y)
+                        SETUP_SELECTOR_STALLGUARD_HOMING=yes
+                        ;;
+                    n)
+                        SETUP_SELECTOR_STALLGUARD_HOMING=no
+                        ;;
+                esac
+            fi
+        fi
+
+        if [ "${HAS_SERVO}" == "yes" ]; then
+
+            if [ "${_hw_mmu_vendor}" == "ERCF" ]; then
+                echo -e "${PROMPT}${SECTION}Which servo are you using?${INPUT}"
+                OPTIONS=()
+                option MG90S    'MG-90S'
+                option SH0255MG 'Savox SH0255MG'
+                option DS041MG  'GDW DS041MG'
+                option OTHER    'Not listed / Other'
+                prompt_option opt 'Servo' "${OPTIONS[@]}"
+                case $opt in
+                    "$MG90S")
+                        _hw_maximum_servo_angle=180
+                        _hw_minimum_pulse_width=0.00085
+                        _hw_maximum_pulse_width=0.00215
+                        _param_servo_always_active=0
+                        _param_servo_up_angle=30
+                        if [ "${_hw_mmu_version}" == "2.0" ]; then
+                            _param_servo_move_angle=61
+                        else
+                            _param_servo_move_angle=${_param_servo_up_angle}
+                        fi
+                        _param_servo_down_angle=140
+                        ;;
+                    "$SH0255MG")
+                        _hw_maximum_servo_angle=180
+                        _hw_minimum_pulse_width=0.00085
+                        _hw_maximum_pulse_width=0.00215
+                        _param_servo_always_active=0
+                        _param_servo_up_angle=140
+                        if [ "${_hw_mmu_version}" == "2.0" ]; then
+                            _param_servo_move_angle=109
+                        else
+                            _param_servo_move_angle=${_param_servo_up_angle}
+                        fi
+                        _param_servo_down_angle=30
+                        ;;
+                    "$DS041MG")
+                        _hw_maximum_servo_angle=180
+                        _hw_minimum_pulse_width=0.00050
+                        _hw_maximum_pulse_width=0.00250
+                        _param_servo_always_active=1
+                        _param_servo_up_angle=30
+                        if [ "${_hw_mmu_version}" == "2.0" ]; then
+                            _param_servo_move_angle=50
+                        else
+                            _param_servo_move_angle=${servo_up_angle}
+                        fi
+                        _param_servo_down_angle=100
+                        ;;
+                    *)
+                        _hw_maximum_servo_angle=180
+                        _hw_minimum_pulse_width=0.00085
+                        _hw_maximum_pulse_width=0.00215
+                        _param_servo_always_active=0
+                        ;;
+                esac
+
+            elif [ "${_hw_mmu_vendor}" == "Tradrack" ]; then
+                echo -e "${PROMPT}${SECTION}Which servo are you using?${INPUT}"
+                OPTIONS=()
+                option TRADRACK_BOM 'PS-1171MG or FT1117M (Tradrack)'
+                option OTHER 'Not listed / Other'
+                prompt_option opt 'Servo' "${OPTIONS[@]}"
+                case $opt in
+                    "$TRADRACK_BOM")
+                        _hw_maximum_servo_angle=131
+                        _hw_minimum_pulse_width=0.00070
+                        _hw_maximum_pulse_width=0.00220
+                        _param_servo_always_active=1
+                        _param_servo_up_angle=145
+                        _param_servo_move_angle=${servo_up_angle}
+                        _param_servo_down_angle=1
+                        ;;
+                    *)
+                        _hw_maximum_servo_angle=131
+                        _hw_minimum_pulse_width=0.00070
+                        _hw_maximum_pulse_width=0.00230
+                        _param_servo_always_active=1
+                        _param_servo_up_angle=145
+                        _param_servo_move_angle=${servo_up_angle}
+                        _param_servo_down_angle=1
+                        ;;
+                esac
+
+            elif [ "${_hw_mmu_vendor}" == "PicoMMU" -o "${_hw_mmu_vendor}" == "MMX" ]; then
+                echo -e "${PROMPT}${SECTION}Which servo are you using?${INPUT}"
+                OPTIONS=()
+                option MMX_BOM 'MG996R'
+                option EMAX_ES3004 'EMAX ES3004'
+                option OTHER 'Not listed / Other'
+                prompt_option opt 'Servo' "${OPTIONS[@]}"
+                case $opt in
+                    "$MMX_BOM")
+                        _hw_maximum_servo_angle=180
+                        _hw_minimum_pulse_width=0.00070
+                        _hw_maximum_pulse_width=0.00230
+                        _param_servo_always_active=0
+                        _param_servo_duration=0.6
+                        _param_servo_dwell=1.0
+                        ;;
+                    "$EMAX_ES3004")
+                        _hw_maximum_servo_angle=140
+                        _hw_minimum_pulse_width=0.00070
+                        _hw_maximum_pulse_width=0.00230
+                        _param_servo_always_active=0
+                        _param_servo_duration=0.6
+                        _param_servo_dwell=1.2
+                        ;;
+                    *)
+                        _hw_maximum_servo_angle=180
+                        _hw_minimum_pulse_width=0.001
+                        _hw_maximum_pulse_width=0.002
+                        _param_servo_always_active=1
+                        _param_servo_duration=0.6
+                        _param_servo_dwell=1.0
+                        ;;
+                esac
+
+            else
+                # Other (unknown) vendor
+                _hw_maximum_servo_angle=180
+                _hw_minimum_pulse_width=0.001
+                _hw_maximum_pulse_width=0.002
+                _param_servo_always_active=0
+                _param_servo_up_angle=0
+                _param_servo_move_angle=0
+                _param_servo_down_angle=0
+            fi
         fi
     fi
 
@@ -2125,9 +2691,6 @@ questionaire() {
     echo "        [include mmu/optional/client_macros.cfg]"
     echo "        [include mmu/addons/blobifier.cfg]"
     echo "        [include mmu/addons/mmu_erec_cutter.cfg]"
-    if [ "${ADDONS_DC_ESPOOLER:-0}" -eq 1 ]; then
-        echo "        [include mmu/addons/dc_espooler.cfg]"
-    fi
     if [ "${ADDONS_EJECT_BUTTONS:-0}" -eq 1 ]; then
         echo "        [include mmu/addons/mmu_eject_buttons.cfg]"
     fi
@@ -2135,7 +2698,7 @@ questionaire() {
     echo "    Later:"
     echo "        * Tweak configurations like speed and distance in mmu_parameters.cfg"
     echo "        * Configure your operational preferences in mmu_macro_vars.cfg"
-    echo 
+    echo
     echo "    Good luck! MMU is complex to setup. Remember Discord is your friend.."
     echo -e "    Join the dedicated Happy Hare forum here: ${EMPHASIZE}https://discord.gg/98TYYUf6f2${INFO}"
     if [ -n "${HELP_URL}" ]; then
@@ -2191,7 +2754,6 @@ HAS_ENCODER=yes
 HAS_SELECTOR=yes
 ADDONS_EREC=0
 ADDONS_BLOBIFIER=0
-ADDONS_DC_ESPOOLER=0
 ADDONS_EJECT_BUTTONS=0
 
 INSTALL=0
@@ -2238,8 +2800,8 @@ cleanup_old_klippy_modules
 if [ "$UNINSTALL" -eq 0 ]; then
     if [ "${INSTALL}" -eq 1 ]; then
         echo -e "${TITLE}$(get_logo "Happy Hare interactive installer...")"
-        read_default_config  # Parses template file parameters into memory
-        questionaire         # Update in memory parameters from questionaire
+        questionaire              # Update in memory parameters from questionaire
+        read_default_config merge # Parses template file parameters and merges into memory
 
         if [ "${INSTALL_PRINTER_INCLUDES}" == "yes" ]; then
             install_printer_includes
@@ -2283,6 +2845,7 @@ if [ "$UNINSTALL" -eq 0 ]; then
     # Copy config files updating from in memory parmameters or h/w settings
     set +e
     copy_config_files
+    remove_old_config_files
     set -e
 
     # Special upgrades of mmu_hardware.cfg

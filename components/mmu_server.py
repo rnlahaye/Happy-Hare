@@ -203,9 +203,11 @@ class MmuServer:
         if not hasattr(self, 'mmu_backend_present'):
             await self._init_mmu_backend()
             if self._mmu_backend_enabled():
+                if self.config.has_option("num_gates"):
+                    logging.warning("The 'num_gates' option in the moonraker [mmu_server] section is ignored when an MMU backend is present and enabled.")
                 self.nb_gates = self.mmu_backend_config.get('mmu', {}).get('num_gates', 0)
             else:
-                self.nb_gates = 1 # for standalone usage (no mmu backend considering standard printer setup)
+                self.nb_gates = self.config.getint("num_gates", 1) # for standalone usage (no mmu backend considering standard or (custom defined) printer setup)
             logging.info(f"MMU num_gates: {self.nb_gates}")
         return True
 
@@ -268,7 +270,7 @@ class MmuServer:
         filament = spool_info["filament"]
         name = filament.get('name', '')
         material = filament.get('material', '')
-        color_hex = filament.get('color_hex', '').strip('#')[:6].lower() # First remove # character if present then strip alpha channel if it exists
+        color_hex = filament.get('color_hex', '').strip('#')[:8].lower() # Remove problematic First # character if present
         temp = filament.get('settings_extruder_temp', '')
         return {'spool_id': spool_id, 'material': material, 'color': color_hex, 'name': name, 'temp': temp}
 
